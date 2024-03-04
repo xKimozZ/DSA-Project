@@ -1,0 +1,293 @@
+#include "Processor_FCFS.h";
+#include"Scheduler.h"
+
+
+
+void Processor_FCFS::CalcExpectedTime()
+{
+	Node<process*>* ptr = new Node<process*>;
+	ptr = RDYTask.getHead();
+	ExpToFinish = 0;
+	while (ptr)
+	{
+		int n;
+		n = ptr->getItem()->GetNum_IO();
+		if (n > 0)
+		{
+			IO_REQ* p = ptr->getItem()->GetIO();
+			ExpToFinish += (p->io_time + ptr->getItem()->GetCT() - ptr->getItem()->GetCRT());
+		}
+		else
+		{
+			ExpToFinish += (ptr->getItem()->GetCT() - ptr->getItem()->GetCRT());
+		}
+		ptr=ptr->getNext();
+	}
+}
+
+float Processor_FCFS::ExpectedTime()
+{
+	return ExpToFinish;
+}
+
+void Processor_FCFS::InsertToRDY(process* p)
+{
+	if (!p) return;
+	RDYnum++;
+	RDYTask.insert(p);
+	p->SetState("RDY");
+	p->ToggleChange();
+	ExpToFinish += p->GetCT() - p->GetCRT();
+}
+
+float Processor_FCFS::TotLoadCalc()
+{
+	return GetBusy() / S->getTotalTD();
+}
+
+float Processor_FCFS::UtilCalc()
+{
+	return GetBusy() / (GetBusy() + GetIdle());
+}
+
+void Processor_FCFS::IncRUN()
+{
+	getRUN()->incCRT();	//Increment CRT
+}
+
+int Processor_FCFS::getSigKillID()
+{
+	if (KillList->getHead())
+		if (KillList->getHead()->getItem())
+			return KillList->getHead()->getItem()->ID;
+	return -1;
+}
+
+void Processor_FCFS::SignalKillCheck(int ts)
+{
+
+	if (!KillList->getHead()) return;						//Safety check
+
+	if (KillList->getHead()->getItem()->timestep <= ts)		//Is the first SIGKILL request's scheduled time here yet?
+	{
+		int tmpID = getSigKillID();
+		if (RDYTask.getByID(tmpID)) {					//If the ID is found
+			SigKilled = ProcKILL(tmpID);				//Set SigKilled to the found process (will be dealt with by scheduler)
+			S->killOrph(SigKilled);
+			SigKilled->SetTT(ts);						//Set termination time as current timestep
+			S->InsertTRM(SigKilled);
+		}
+		else if (getRUN())								//Checks if RUN process exists
+			if (getRUN()->GetPID() == tmpID)				//Checks if IDs match
+			{
+				SigKilled = runForkKILL(tmpID);				//Set SigKilled to the found process (will be dealt with by scheduler)
+				S->killOrph(SigKilled);
+				SigKilled->SetTT(ts);						//Set termination time as current timestep
+				S->InsertTRM(SigKilled);
+			}
+	}
+	KillList->dequeue();
+}
+
+process* Processor_FCFS::retSigKilled()
+{
+	if (!SigKilled)
+		return nullptr;
+	return SigKilled;
+}
+
+void Processor_FCFS::resetSK()
+{
+	SigKilled = nullptr;
+}
+
+//Note: GetCRT() is missing in process & SetTT is supposed to take an int parameter
+//IO_Queue doesn't exist yet. I suggest it be a queue of IO_R objects in process class
+
+void Processor_FCFS::ScheduleAlgo()	//Incomplete function: Check above notes
+{
+	int ts = S->GetTS();
+
+	if (Status())	//If processor is busy (is executing a tasl)
+	{
+		if (getRUN()->GetCT() > getRUN()->GetCRT())	//If the running task is not over yet
+		if (getRUN()->GetNum_IO() > 0)
+		{//If it's CRT equals IO_R
+			if (getRUN()->GetIO()->io_time == getRUN()->GetCRT())
+			{
+				IncIdle();									//Increment idle time as not actively executing process
+				//CalcExpectedTime();
+				SetStatus(false);
+				getRUN()->SetState("BLK");					//Set state as BLK
+				S->IO_handling(this->getRUN());
+				SetRUN(nullptr);			//Dequeue a IO_R object (an io request has been carried out)
+			}
+			else
+			{
+				IncRUN();
+				IncBusy();
+			}
+
+		}
+		else
+		{
+			IncRUN();								//Increment its CRT
+			IncBusy();
+		}
+		else if (getRUN()->GetCT() == getRUN()->GetCRT())	//If it's CRT equals CT (supposed to be over)
+		{
+			IncIdle();
+			getRUN()->SetTT(ts);						//Set termination time as current timestep
+			SetStatus(false);							//CPU no longer busy
+			S->killOrph(getRUN());
+			S->InsertTRM(getRUN());					//Set state as TRM, move into TRM list
+			SetRUN(nullptr);
+			//What I intend from here, is a check in the scheduler.
+			//If processor is not busy but has a running process (which should be terminated anyway)
+			//Then the scheduler will take it from the processor and deal with it afterwards depending on the set state
+		}
+
+		//else if (getRUN()->GetIO()->io_time == getRUN()->GetCRT())	//If it's CRT equals IO_R
+		//{
+		//	SetStatus(false);
+		//	getRUN()->SetState("BLK");					//Set state as BLK
+		//	S->IO_handling(this->getRUN());	
+		//	SetRUN(nullptr);			//Dequeue a IO_R object (an io request has been carried out)
+		//}
+
+	}
+	else //processor not busy, no running tasks
+
+	{
+
+		if (RDYTask.getHead()) //if there's a task ready in the queue
+		{
+			if (RDYTask.getHead() && (S->FindShortestRR() != -1)) //If RDY queue is not empty, and RR processors exist
+			{
+				int TWT = ts - RDYTask.getHead()->getItem()->GetAT() - RDYTask.getHead()->getItem()->GetCRT();
+				while (TWT > S->GetMaxW() && RDYTask.getHead())
+				{
+					ExpToFinish -= RDYTask.getHead()->getItem()->GetCT() - RDYTask.getHead()->getItem()->GetCRT();
+					S->migrationprocess_from_FCFS_To_RR(RDYTask.remove());
+					RDYnum--;
+					if (RDYTask.getHead())
+						TWT = ts - RDYTask.getHead()->getItem()->GetAT() - RDYTask.getHead()->getItem()->GetCRT();
+				}
+				if (RDYTask.getHead())
+				RDYToRUN();
+			}
+			else
+			RDYToRUN();
+		}
+		IncIdle();
+	}
+
+	//SignalKillCheck(ts);
+
+	if (getRUN() && Status())		//Check if processor is running something
+	{
+		if (getRUN()->ProcessForkAttempt(*ForkProb))	//Checks if process will try to fork
+		{
+			S->ForkProcess(getRUN());				//Inform scheduler to fork the process
+		} //Scheduler work
+	}
+}
+
+bool Processor_FCFS::RDYEmpty()
+{
+	if (RDYTask.isEmpty())
+		return true;
+	else
+		return false;
+}
+
+void Processor_FCFS::RDYToRUN()
+{
+	if (RDYEmpty())
+		return;
+	if (!RDYTask.getHead()->getItem()->isChange())
+		return;
+	RDYnum--;
+	ExpToFinish -= RDYTask.getHead()->getItem()->GetCT() - RDYTask.getHead()->getItem()->GetCRT();
+	SetRUN(RDYTask.remove());
+	SetStatus(true);
+	if (getRUN()->GetCRT() == 0) //If process was never RUN before
+		getRUN()->SetRT(S->GetTS());	//Calculate its response time
+	getRUN()->SetState("RUN");
+	getRUN()->ToggleChange();
+}
+
+void Processor_FCFS::PrintRDY()
+{
+	RDYTask.print();
+}
+
+
+process* Processor_FCFS::ProcKILL(int id)
+{
+	Node<process*>* tmpNode = RDYTask.getByID(id);
+	if (tmpNode)
+	{
+		if (tmpNode->getItem()->isChange())
+		{
+			RDYnum--;
+			S->IncKilled();
+			ExpToFinish -= tmpNode->getItem()->GetCT() -tmpNode->getItem()->GetCRT();
+		}
+		else
+		{
+			return nullptr;
+		}
+	}
+	else
+		return nullptr;
+	return RDYTask.findAndRemove(id);
+
+}
+
+process* Processor_FCFS::runForkKILL(int id)
+{
+	if (getRUN())
+		if (getRUN()->GetPID() == id)
+		{
+			process* p = getRUN();
+			SetStatus(false);							//CPU no longer busy
+			SetRUN(nullptr);						//Set running as nullptr
+			S->IncKilled();
+			return p;
+		}
+	return nullptr;
+}
+
+void Processor_FCFS::resetProcesses()
+{
+	RDYTask.resetStatus();
+}
+
+Processor_FCFS::Processor_FCFS(Scheduler* S): Processor(S)
+{
+	ForkProb = S->getForkProb();
+	KillList = S->RetSigKill();
+	SigKilled = nullptr;
+}
+
+process* Processor_FCFS::GetProcessFromRdy()
+{
+	Node<process*>* prc;
+
+	prc = RDYTask.getHead();
+	while (prc)
+	{
+		if (prc->getItem()->IsForked())
+			prc = prc->getNext();
+		else
+		{
+			int id = prc->getItem()->GetPID();
+			ExpToFinish -= RDYTask.getHead()->getItem()->GetCT() - RDYTask.getHead()->getItem()->GetCRT();
+			process* stolen = ProcKILL(id);
+			return stolen;
+		}
+	}
+	return nullptr;
+
+}
